@@ -1,0 +1,130 @@
+<mxfile host="app.diagrams.net" modified="2026-03-26T00:00:00.000Z" agent="TurboQuant-KV" version="22.1.0" type="device">
+  <diagram id="arch-main" name="TurboQuant-KV 架构">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="&lt;b&gt;TurboQuant-KV（turboquant-kv）系统架构&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;与 vLLM / SGLang 集成视角 · 可用 draw.io / diagrams.net 打开编辑&lt;/font&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="280" y="20" width="520" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Inference engines -->
+        <mxCell id="lane-engines" value="推理引擎（外部）" style="swimlane;horizontal=0;startSize=24;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="1040" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="vllm" value="&lt;b&gt;vLLM 0.18.x&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;V1: attention backend&lt;br&gt;Paged KV · FlashInfer / Triton / …&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-engines">
+          <mxGeometry x="40" y="40" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="sglang" value="&lt;b&gt;SGLang 0.5.x&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;RadixAttention&lt;br&gt;attention_registry · token KV pool&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-engines">
+          <mxGeometry x="280" y="40" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="other" value="&lt;b&gt;其他运行时&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;PyTorch 手写解码&lt;br&gt;Transformers 实验等&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;dashed=1;" vertex="1" parent="lane-engines">
+          <mxGeometry x="520" y="40" width="180" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="phase-c" value="&lt;b&gt;Phase C（目标）&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;GPU TurboQuant kernel&lt;br&gt;与分页 / radix 对齐&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="lane-engines">
+          <mxGeometry x="760" y="40" width="220" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Integrations -->
+        <mxCell id="lane-int" value="turboquant.integrations（本仓库）" style="swimlane;horizontal=0;startSize=24;fillColor=#e6f2e6;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="250" width="1040" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-vllm" value="&lt;b&gt;vllm&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;register_turboquant_dev_backend()&lt;br&gt;→ AttentionBackendEnum.CUSTOM&lt;br&gt;kv_bridge（5D paged 布局）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-int">
+          <mxGeometry x="40" y="35" width="240" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-sglang" value="&lt;b&gt;sglang&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;register_turboquant_dev_sglang_backend()&lt;br&gt;→ ATTENTION_BACKENDS&lt;br&gt;kv_bridge（token pool 说明）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-int">
+          <mxGeometry x="310" y="35" width="260" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-token" value="&lt;b&gt;token_layout&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;[T,H,D] → (1,H,T,D)&lt;br&gt;供 KeyCodec.compress_bhsd&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="lane-int">
+          <mxGeometry x="600" y="35" width="200" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-phaseb" value="&lt;b&gt;Phase B&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;当前 dev backend&lt;br&gt;委托 CPU / TorchNative&lt;br&gt;验证注册链路&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="lane-int">
+          <mxGeometry x="830" y="35" width="170" height="85" as="geometry"/>
+        </mxCell>
+
+        <!-- Core API -->
+        <mxCell id="lane-core" value="turboquant 核心 API" style="swimlane;horizontal=0;startSize=24;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="400" width="1040" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="keycodec" value="&lt;b&gt;KeyCodec&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;compress_* · attention_scores_*&lt;br&gt;非对称 QK（TurboQuant + QJL）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane-core">
+          <mxGeometry x="40" y="35" width="220" height="75" as="geometry"/>
+        </mxCell>
+        <mxCell id="valcodec" value="&lt;b&gt;ValueCodec&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;MSE 路径&lt;br&gt;softmax @ V 前解压 / 融合&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane-core">
+          <mxGeometry x="290" y="35" width="200" height="75" as="geometry"/>
+        </mxCell>
+        <mxCell id="integration-py" value="&lt;b&gt;integration&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;hooks · KV 估算&lt;br&gt;dependency_guide&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane-core">
+          <mxGeometry x="520" y="35" width="180" height="75" as="geometry"/>
+        </mxCell>
+        <mxCell id="metrics" value="&lt;b&gt;metrics / validation&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;对拍 · 质量门&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane-core">
+          <mxGeometry x="730" y="35" width="160" height="75" as="geometry"/>
+        </mxCell>
+        <mxCell id="cli" value="&lt;b&gt;CLI&lt;/b&gt;&lt;br&gt;turboquant-verify&lt;br&gt;turboquant-validate" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lane-core">
+          <mxGeometry x="920" y="35" width="140" height="75" as="geometry"/>
+        </mxCell>
+
+        <!-- Implementations -->
+        <mxCell id="lane-impl" value="实现层" style="swimlane;horizontal=0;startSize=24;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="540" width="1040" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="native" value="&lt;b&gt;turboquant._native&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;C++ / Eigen / OpenMP&lt;br&gt;KeyCompressor · ValueCompressor&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-impl">
+          <mxGeometry x="40" y="32" width="240" height="68" as="geometry"/>
+        </mxCell>
+        <mxCell id="torch-ref" value="&lt;b&gt;PyTorch 参考&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;compressors · torch_impl&lt;br&gt;与 native 非逐位一致 RNG&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="lane-impl">
+          <mxGeometry x="310" y="32" width="240" height="68" as="geometry"/>
+        </mxCell>
+        <mxCell id="cpp-lib" value="&lt;b&gt;cpp/&lt;/b&gt; libturboquant&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;静态库 + 测试&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;dashed=1;" vertex="1" parent="lane-impl">
+          <mxGeometry x="580" y="32" width="200" height="68" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrows: engines to integrations -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#666666;" edge="1" parent="1" source="vllm" target="int-vllm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#666666;" edge="1" parent="1" source="sglang" target="int-sglang">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" value="调用 / 扩展" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#82b366;dashed=1;" edge="1" parent="1" source="int-vllm" target="keycodec">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#82b366;dashed=1;" edge="1" parent="1" source="int-sglang" target="keycodec">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="440" y="390"/>
+              <mxPoint x="150" y="390"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#82b366;" edge="1" parent="1" source="int-token" target="keycodec">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="700" y="390"/>
+              <mxPoint x="150" y="390"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#b85450;" edge="1" parent="1" source="keycodec" target="native">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#b85450;" edge="1" parent="1" source="keycodec" target="torch-ref">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#b85450;dashed=1;" edge="1" parent="1" source="valcodec" target="torch-ref">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e9" value="未来" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;strokeColor=#d6b656;dashed=1;" edge="1" parent="1" source="phase-c" target="int-phaseb">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="870" y="200"/>
+              <mxPoint x="915" y="200"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="legend" value="&lt;b&gt;图例&lt;/b&gt;&lt;br&gt;蓝色：外部引擎 / C++&lt;br&gt;绿色：integrations&lt;br&gt;红色：Python 服务 API&lt;br&gt;橙虚线：Phase C 目标" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;align=left;spacingLeft=8;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="670" width="200" height="90" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

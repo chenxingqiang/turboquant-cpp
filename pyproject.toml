@@ -1,0 +1,83 @@
+[build-system]
+requires = ["scikit-build-core>=0.10.0", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "turboquant-kv"
+version = "0.1.0"
+description = "TurboQuant-style KV cache compression: numpy + native C++/Eigen; optional PyTorch reference"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "TurboQuant-KV contributors" }]
+keywords = ["llm", "kv-cache", "quantization", "turboquant", "inference"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.22",
+]
+
+[project.optional-dependencies]
+torch = [
+  "torch>=2.0.0",
+  "scipy>=1.10.0",
+]
+validate = [
+  "torch>=2.0.0",
+  "scipy>=1.10.0",
+  "transformers>=4.40.0",
+  "accelerate>=0.25.0",
+  "bitsandbytes>=0.43.0",
+]
+# vLLM integration dev / tests (Linux + CUDA typical; may not install on macOS)
+vllm = [
+  "torch>=2.0.0",
+  "scipy>=1.10.0",
+  "vllm>=0.18.0,<0.19",
+]
+sglang = [
+  "torch>=2.0.0",
+  "scipy>=1.10.0",
+  "sglang>=0.5.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/chenxingqiang/turboquant-cpp"
+Repository = "https://github.com/chenxingqiang/turboquant-cpp"
+Issues = "https://github.com/chenxingqiang/turboquant-cpp/issues"
+
+[project.scripts]
+turboquant-verify = "turboquant.cli:verify_cli"
+turboquant-validate = "turboquant.validate:main"
+
+[tool.scikit-build]
+minimum-version = "0.10"
+# Distribution name is turboquant-kv; import name is turboquant — must list explicitly.
+wheel.packages = ["turboquant"]
+cmake.source-dir = "cpp"
+cmake.args = [
+  "-DTURBOQUANT_BUILD_PYTHON=ON",
+  "-DTURBOQUANT_BUILD_TESTS=OFF",
+]
+
+[tool.scikit-build.sdist]
+include = ["turboquant", "cpp", "tests", "docs", "examples", "pyproject.toml", "README.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+  "torch>=2.0.0",
+  "scipy>=1.10.0",
+]

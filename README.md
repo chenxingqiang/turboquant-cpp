@@ -1,204 +1,300 @@
-# TurboQuant
+# TurboQuant-KV (`turboquant-kv`)
 
-A from-scratch PyTorch implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026), Google's two-stage vector quantization algorithm for compressing LLM key-value caches.
+Implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026): two-stage vector quantization for **LLM KV caches** (random rotation + Lloyd–Max, plus **QJL** for unbiased attention inner products). This repo ships a **pip/uv package**, a **PyTorch reference**, an optional **C++/Eigen extension** (`turboquant._native`), and CLI tools for synthetic and real-model checks.
 
-We implemented the algorithm from the paper, validated it on synthetic vectors, then tested it against a real model's KV cache (Qwen2.5-3B-Instruct on an RTX 3060) to verify the compression and accuracy claims.
+**PyPI name:** `turboquant-kv` · **Import:** `import turboquant`
 
-## Background
+**Canonical upstream:** development and releases are tracked at [github.com/chenxingqiang/turboquant-cpp](https://github.com/chenxingqiang/turboquant-cpp) (default branch **`main`**).
 
-When an LLM generates text, it stores a **key** and **value** vector for every token it has seen, in every layer. This is the KV cache — the model's working memory. At 8K tokens on a 36-layer model like Qwen2.5-3B, this cache is **289 MB** in FP16. On a 12GB GPU, the KV cache — not the model weights — becomes the bottleneck for long context.
+**Git default branch:** local and remote use `main` (not `master`). If the GitHub UI still shows `master` as default, set **Settings → General → Default branch** to `main`, or run `gh repo edit --default-branch main`. After that: `git fetch origin && git remote set-head origin -a`. Optional cleanup: `git push origin --delete master` once nothing depends on it.
 
-TurboQuant compresses this cache by quantizing the vectors to 2-4 bits per coordinate, achieving 3-7x compression with minimal impact on attention accuracy.
+---
 
-## How TurboQuant Works
+## Contents
 
-The algorithm has two stages:
+- [What you get](#what-you-get)
+- [Install](#install)
+- [Dependencies: PyTorch, Transformers, vLLM/SGLang](#dependencies-pytorch-transformers-vllmsglang)
+- [vLLM 完整适配（单独文档）](docs/vllm-integration.md)
+- [SGLang 适配（单独文档）](docs/sglang-integration.md)
+- [vLLM / SGLang 实操教程（英文）](docs/tutorial-inference-integrations.md)
+- [NumPy, JAX, and this package](#numpy-jax-and-this-package)
+- [Public API](#public-api)
+- [Where it fits in inference](#where-it-fits-in-inference)
+- [C++ library](#c-library)
+- [Algorithm (short)](#algorithm-short)
+- [Reported results](#reported-results)
+- [CLI](#cli)
+- [Repository layout](#repository-layout)
+- [Requirements & CUDA PyTorch](#requirements--cuda-pytorch)
+- [References & license](#references--license)
 
-### Stage 1: Random Rotation + Lloyd-Max Quantization
+---
 
-Each vector is multiplied by a random orthogonal matrix (generated via QR decomposition of a Gaussian matrix). This rotation is the key trick — it makes every coordinate of the resulting vector follow a predictable bell-curve distribution (Beta distribution, well-approximated by Gaussian N(0, 1/d) for typical head dimensions).
+## What you get
 
-Because the distribution is known and coordinates become nearly independent, we can design an **optimal scalar quantizer** (Lloyd-Max) for each coordinate independently. The Lloyd-Max algorithm finds the best set of "buckets" to round values into, minimizing mean squared error. We precompute these codebooks once per bit-width.
+| Layer | Purpose |
+|--------|---------|
+| **`KeyCodec` / `ValueCodec`** | Stable service API: compress K/V, asymmetric QK scores, MSE value path. |
+| **`turboquant._native`** | Fast C++ path (Eigen, optional OpenMP); **NumPy in/out**, no PyTorch required. |
+| **PyTorch modules** (`[torch]` extra) | `TurboQuantMSE`, `TurboQuantProd`, `TurboQuantKVCache`, `compressors` — paper-aligned reference. |
+| **`turboquant-verify`** | Synthetic validation (needs `[torch]`). |
+| **`turboquant-validate`** | Qwen2.5 KV experiment (needs `[validate]` + CUDA). |
+| **`cpp/`** | Static library + tests; same math as native wheel. |
 
-To quantize: rotate the vector, round each coordinate to its nearest codebook centroid, store the indices.
-To dequantize: look up centroids, reverse the rotation.
+---
 
-### Stage 2: QJL Residual Correction (1 bit)
+## Install
 
-The MSE-optimal quantizer from Stage 1 introduces a small bias in dot products (inner products). Since attention scores are just dot products between queries and keys, this bias accumulates.
+### pip
 
-The Quantized Johnson-Lindenstrauss (QJL) transform fixes this. It takes the quantization residual (the error left over from Stage 1), projects it through a random Gaussian matrix, and stores just the **sign** (+1 or -1) of each projection — exactly 1 bit per dimension. This single bit is enough to make the inner product estimate **mathematically unbiased**.
-
-The combined estimator for `<query, key>` is:
-
+```bash
+pip install turboquant-kv                 # core: NumPy only; builds/links _native when possible
+pip install turboquant-kv[torch]         # + PyTorch, SciPy (reference, metrics, turboquant-verify)
+pip install turboquant-kv[validate]     # + Transformers stack (turboquant-validate)
+pip install turboquant-kv[vllm]        # + vLLM 0.18.x (integrations.dev_backend; Linux/CUDA typical)
+pip install turboquant-kv[sglang]      # + SGLang (integrations.sglang.dev_backend; see SGLang docs)
+pip install -e .                         # from source: CMake + Eigen fetch for _native
 ```
+
+### uv
+
+```bash
+cd /path/to/turboquant-cpp
+uv sync --group dev --extra torch       # pytest + torch + scipy (for tests)
+uv run pytest tests/
+uv run turboquant-verify                # needs [torch]
+```
+
+Minimal resolver check (NumPy-only tree): `uv sync` without `--extra torch`.
+
+### macOS (Xcode license)
+
+If CMake says the C++ compiler is “broken” with *“You have not agreed to the Xcode license agreements”*, run `sudo xcodebuild -license`, then remove `cpp/build` and reconfigure.
+
+---
+
+## Dependencies: PyTorch, Transformers, vLLM/SGLang
+
+- **PyTorch is optional.** Default install is **NumPy only**. With `_native` built, `KeyCodec` / `ValueCodec` with `backend="native"` run on **NumPy `float32`** buffers without importing PyTorch.
+- **`[torch]`** adds PyTorch + SciPy for the reference stack, `metrics`, `validation`, and **`turboquant-verify`**.
+- **Transformers** does not replace PyTorch; it typically sits on PyTorch. Use **`[validate]`** for the Qwen validation script.
+- **vLLM / SGLang** require **per-engine integration** (KV write + attention path). This repo stays **framework-agnostic** at the API level. Longer text: `turboquant.dependency_guide()` or `turboquant.GUIDE_MARKDOWN`.
+
+**vLLM 专项：** TurboQuant 不是 FP8 KV 那种「反量化再 matmul」；要在 vLLM 里 **省显存且真加速**，需要新 attention/KV 分支 + **GPU kernel** 与 **Paged KV** 对齐。完整分期、改哪些层、和 vLLM 官方 [Quantized KV Cache](https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache/) 的差异，见 **[docs/vllm-integration.md](docs/vllm-integration.md)**。
+
+**本仓库开发接口：** `pip install 'turboquant-kv[vllm]'` 后可用 `turboquant.integrations.vllm.register_turboquant_dev_backend()` 向 vLLM 0.18 注册 **CUSTOM** 开发 backend（当前委托 CPU 注意力，用于接线验证）；细节见 [docs/vllm-integration.md](docs/vllm-integration.md) §8。**SGLang**：`pip install 'turboquant-kv[sglang]'` 与 `turboquant.integrations.sglang.register_turboquant_dev_sglang_backend()`，启动时 `--attention-backend turboquant_dev`，见 [docs/sglang-integration.md](docs/sglang-integration.md)。
+
+---
+
+## NumPy, JAX, and this package
+
+**There is no JAX implementation in this repository.** The C++ codec returns **NumPy arrays**; you can use it from a JAX workflow by moving data to the host and wrapping back.
+
+**Feeding `KeyCodec` from JAX**
+
+- Convert to host **NumPy**, **C-contiguous `float32`**, shape `(N, head_dim)`:
+
+  ```python
+  import numpy as np
+  import jax
+
+  x_np = np.asarray(jax.device_get(x_jax), dtype=np.float32, order="C")
+  ```
+
+- Then `codec.compress_flat(x_np)` and `codec.attention_scores_flat(q_np, compressed)` as usual.
+
+**NumPy version vs JAX**
+
+- This package declares **`numpy>=1.22`** in `pyproject.toml`. In an environment that also installs **JAX**, the resolver will satisfy **both** packages’ constraints.
+- **Current `jax` on PyPI** (check [jax on PyPI](https://pypi.org/project/jax/)) may require **`numpy>=2.0`** — in that case your env will get NumPy 2.x automatically.
+- **Older JAX** (e.g. **0.4.35**) used **`numpy>=1.24`**, and **`numpy>=1.26`** on **Python ≥ 3.12** (see that release’s metadata on PyPI).
+- JAX’s support policy (Python / NumPy ranges) is documented here: [Python and NumPy version support policy](https://docs.jax.dev/en/latest/deprecation.html).
+
+**Practical rule:** pick your **JAX (and jaxlib) version first**, then install `turboquant-kv`; let pip/uv resolve **NumPy** to a version compatible with both. If you need a specific NumPy major line, pin **`jax`** / **`jaxlib`** accordingly.
+
+---
+
+## Public API
+
+| Symbol | Role |
+|--------|------|
+| **`CompressionConfig`** | `head_dim`, `bits`, `seed`, `device` (device used by PyTorch backend only). |
+| **`KeyCodec`** | `compress_flat` / `compress_bhsd` → **`CompressedKeys`**; `attention_scores_flat` / `attention_scores_bhsd`. `backend="auto"`: **native** if `_native` exists, else **torch**. |
+| **`ValueCodec`** | MSE path: `compress_*` / `decompress_*`. |
+| **`compressed_keys_to_torch_dict`** | Bridge to `TurboQuantCompressorV2.asymmetric_attention_scores`. |
+| **`estimate_kv_storage`** | KV bit budget vs FP16 (same style as `validate.py`). |
+| **`integration_hooks`**, **`integration_readme`**, **`dependency_guide`** | Integration checklist and prose. |
+| **`metrics.*`** | Cosine / RMSE / top-k agreement on score tensors. |
+| **`diagnose_attention_bhsd`**, **`quick_smoke_key_codec`** | Quality checks vs full-precision attention. |
+
+Reference classes (`TurboQuantMSE`, …) are **lazy-imported** on first access so `import turboquant` does not load PyTorch until needed.
+
+**Example (PyTorch backend, GPU)**
+
+```python
+import torch
+from turboquant import CompressionConfig, KeyCodec, diagnose_attention_bhsd
+
+cfg = CompressionConfig(head_dim=128, bits=3, device="cuda")
+codec = KeyCodec(cfg)
+keys = torch.randn(1, 8, 1024, 128, device="cuda")
+q = keys[:, :, -1:, :]
+ck = codec.compress_bhsd(keys)
+scores = codec.attention_scores_bhsd(q, ck)
+diag = diagnose_attention_bhsd(q, keys, codec)
+print(diag.mean_cosine_similarity, diag.mean_top1_match)
+```
+
+**Example (native + NumPy only)**
+
+```python
+import numpy as np
+from turboquant import CompressionConfig, KeyCodec
+
+cfg = CompressionConfig(head_dim=128, bits=3)
+codec = KeyCodec(cfg, backend="native")
+keys = np.random.randn(256, 128).astype(np.float32)
+ck = codec.compress_flat(keys)
+q = np.random.randn(1, 128).astype(np.float32)
+scores = codec.attention_scores_flat(q, ck)  # (1, 256)
+```
+
+---
+
+## Where it fits in inference
+
+1. **Prefill / decode:** when K and V are produced, store **compressed** representations instead of dense FP16/BF16 (see `KeyCodec` / `ValueCodec`).
+2. **Attention:** form QK logits with **`attention_scores_*`** on compressed K; avoid full dequant + matmul unless you choose to.
+3. **Values:** decompress MSE values for `softmax @ V`, or fuse in a custom kernel later.
+
+Structured checklist: `turboquant.integration.integration_hooks()`.
+
+---
+
+## C++ library
+
+Location: **`cpp/`**. Eigen is fetched at configure time (no system Eigen required). Optional **OpenMP** for batch compression.
+
+```bash
+cd cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBOQUANT_BUILD_PYTHON=OFF
+cmake --build build -j
+ctest --test-dir build
+```
+
+API overview: **`cpp/README.md`**. Pybind module **`turboquant._native`** is built when installing the Python package (scikit-build-core + CMake).
+
+**Note:** C++ RNG is **not** bit-identical to PyTorch for the same integer seed.
+
+---
+
+## Algorithm (short)
+
+1. **Stage 1 (MSE):** random orthogonal rotation, then per-coordinate **Lloyd–Max** quantization (coordinate distribution ~ Gaussian in high `d`).
+2. **Stage 2 (QJL):** store **signs** of random Gaussian projections of the **residual** so estimated **inner products** (attention scores) are **unbiased** despite aggressive quantization.
+
+Estimator (conceptually):
+
+```text
 <q, k> ≈ <q, k_mse> + ||residual|| * sqrt(pi/2) / m * <S @ q, sign(S @ residual)>
 ```
 
-Where `S` is the random projection matrix, `k_mse` is the Stage 1 reconstruction, and `residual = k - k_mse`.
+High per-vector error is acceptable if **score distribution** over keys is preserved — that is what QJL targets.
 
-### Why This Works Despite High Per-Vector Error
+---
 
-An important subtlety: the per-vector reconstruction error is significant (23-44% relative error depending on bit-width). If you decompress the vectors and feed them to standard attention, the model produces garbage.
+## Reported results
 
-But TurboQuant doesn't need accurate vector reconstruction. It needs accurate **inner products** (attention scores). The QJL correction ensures these are unbiased with variance O(1/d), where d is the head dimension (typically 128). The attention distribution over tokens is preserved even when individual vectors look quite different from the originals.
+### Synthetic (`turboquant-verify`)
 
-## Our Findings
+**MSE** (d=128, 1000 random unit vectors):
 
-### Synthetic Vector Tests (`test_turboquant.py`)
+| Bits | Measured MSE | Paper bound | Ratio |
+|------|-------------|-------------|-------|
+| 1 | 0.362 | 0.680 | 0.53x |
+| 2 | 0.116 | 0.170 | 0.68x |
+| 3 | 0.034 | 0.043 | 0.81x |
+| 4 | 0.009 | 0.011 | 0.87x |
 
-We first validated the core algorithm on random unit vectors against the paper's theoretical bounds.
+**Inner products** (d=128, 2000 pairs): near-zero bias; correlation with true IP up to **~0.98** at 4-bit. **Needle-in-haystack:** 9/9 exact in tested settings.
 
-**MSE Distortion** (d=128, 1000 random unit vectors):
+### Real model (`turboquant-validate`, Qwen2.5-3B-Instruct, RTX 3060)
 
-| Bits | Measured MSE | Paper's Upper Bound | Ratio |
-|------|-------------|-------------------|-------|
-| 1-bit | 0.362 | 0.680 | 0.53x |
-| 2-bit | 0.116 | 0.170 | 0.68x |
-| 3-bit | 0.034 | 0.043 | 0.81x |
-| 4-bit | 0.009 | 0.011 | 0.87x |
+**Compression (8K context, illustrative):**
 
-All well within the theoretical bounds. The ratio approaching 1.0 at higher bit-widths is expected — the bound is tighter when quantization is finer.
+| Config | KV size | vs FP16 |
+|--------|---------|---------|
+| FP16 | ~289 MB | 1.0x |
+| TQ 4-bit | ~76 MB | ~3.8x |
+| TQ 3-bit | ~58 MB | ~5.0x |
+| TQ 2-bit | ~40 MB | ~7.3x |
 
-**Inner Product Accuracy** (d=128, 2000 random vector pairs):
+**Attention fidelity (excerpt):** cosine similarity of score vectors often **>0.99** at 3–4 bit; top-1 token match per head varies (see full tables in earlier project notes / paper comparison).
 
-| Bits | Bias | Correlation with True IP |
-|------|------|------------------------|
-| 2-bit | +0.001 | 0.80 |
-| 3-bit | +0.000 | 0.93 |
-| 4-bit | +0.000 | 0.98 |
+---
 
-Near-zero bias at all bit-widths confirms QJL correction works. Correlation of 0.98 at 4-bit means the estimated inner products track the true values very closely.
+## CLI
 
-**Needle-in-Haystack** (synthetic vectors, finding the most similar vector):
+| Command | Needs | Description |
+|---------|--------|-------------|
+| `turboquant-verify` | `[torch]` | Synthetic checks (Lloyd–Max, MSE, QJL, KV ratios, needle, optional GPU timing). |
+| `turboquant-validate` | `[validate]`, CUDA | Qwen KV capture + score comparison. |
 
-9/9 exact retrieval across all bit-widths (2, 3, 4) and sequence lengths (512, 2048, 8192). TurboQuant correctly identifies the closest vector every time.
+Also: `python -m turboquant.cli`, `python -m turboquant.validate`.
 
-### Real Model Validation (`validate.py`)
+---
 
-We loaded Qwen2.5-3B-Instruct in 4-bit quantization on an RTX 3060 (12GB), ran a forward pass on a long document containing a hidden fact, captured the real KV cache, compressed it with TurboQuant, and compared the attention scores.
+## Repository layout
 
-**Compression Ratios** (consistent across all context lengths):
-
-| Config | KV Cache Size (8K ctx) | Compression |
-|--------|----------------------|-------------|
-| FP16 (baseline) | 289 MB | 1.0x |
-| TurboQuant 4-bit | 76 MB | **3.8x** |
-| TurboQuant 3-bit | 58 MB | **5.0x** |
-| TurboQuant 2-bit | 40 MB | **7.3x** |
-
-At 3-bit, 289 MB becomes 58 MB. On a 12GB GPU, that's the difference between fitting ~8K context and fitting ~40K.
-
-**Attention Score Accuracy** (averaged across all 36 layers, 2 KV heads per layer = 72 total checks):
-
-| Config | Context | Cosine Sim | Top-1 Match | Top-5 Match |
-|--------|---------|-----------|-------------|-------------|
-| TQ-4bit | 2K | 0.9989 | 85% | 96% |
-| TQ-4bit | 4K | 0.9986 | 92% | 94% |
-| TQ-4bit | 8K | 0.9983 | 86% | 96% |
-| TQ-3bit | 2K | 0.9961 | 85% | 94% |
-| TQ-3bit | 4K | 0.9955 | 75% | 88% |
-| TQ-3bit | 8K | 0.9945 | 86% | 94% |
-| TQ-2bit | 2K | 0.9897 | 63% | 83% |
-| TQ-2bit | 4K | 0.9878 | 65% | 85% |
-| TQ-2bit | 8K | 0.9851 | 71% | 89% |
-
-**What the metrics mean:**
-
-- **Cosine Similarity**: How similar the full vector of attention scores is between compressed and original. 0.995 means the compressed attention pattern is 99.5% similar. This is the most important metric — it captures the overall shape of "which tokens does the model attend to."
-- **Top-1 Match**: Does the single most-attended token stay the same after compression? 87% at 4-bit means 63 out of 72 layer-head combinations point to the exact same token.
-- **Top-5 Match**: Is the real most-attended token still in the top 5 after compression? 96% at 4-bit means only 3 out of 72 heads shifted their top pick out of the top 5.
-
-**Key observations:**
-- Cosine similarity is remarkably stable across context lengths (0.998 at 4-bit regardless of 2K or 8K)
-- 3-bit is the practical sweet spot: 5x compression with 99.5% attention fidelity
-- 2-bit works but pushes it — 66% top-1 match means the model would sometimes attend to different tokens
-- The paper's "zero accuracy loss" claim at 3.5 bits is plausible given these numbers
-
-## Scripts
-
-### `test_turboquant.py` — Synthetic Validation
-
-Validates the core algorithm with no model or GPU required (GPU enables an optional speed benchmark).
-
-**What it does:**
-1. Builds Lloyd-Max codebooks for various dimensions (64, 128, 256) and bit-widths (1-4)
-2. Generates random unit vectors and measures quantize-dequantize MSE against theoretical bounds
-3. Tests inner product estimation with QJL correction — measures bias and correlation
-4. Demonstrates that MSE-only quantization is biased (motivating QJL)
-5. Tests the KV cache wrapper and reports compression ratios
-6. Runs needle-in-haystack retrieval on synthetic vectors
-7. Benchmarks quantization speed on GPU (if available)
-
-**Run it:**
-```bash
-python -m turboquant.test_turboquant
-```
-
-### `validate.py` — Real Model Validation
-
-Tests TurboQuant on actual KV cache data from a real language model.
-
-**What it does:**
-1. Loads Qwen2.5-3B-Instruct in 4-bit quantization (~2GB VRAM)
-2. Builds a long document with filler text and a hidden "needle" fact
-3. Runs a single forward pass to capture the full KV cache (all 36 layers)
-4. For each bit-width (2, 3, 4), compresses every layer's keys and values
-5. Computes attention scores using both the original keys and the TurboQuant asymmetric estimator
-6. Reports compression ratios, cosine similarity, and top-N retrieval accuracy
-
-**Run it:**
-```bash
-python -m turboquant.validate
-```
-
-First run downloads the model (~2GB). Requires a CUDA GPU with at least 6GB VRAM.
-
-## Project Structure
-
-```
+```text
+pyproject.toml          # scikit-build-core, optional extras, wheel.packages = turboquant
+uv.lock                 # uv lock (uv lock)
 turboquant/
-  __init__.py           # Package exports
-  lloyd_max.py          # Lloyd-Max optimal scalar quantizer solver
-  turboquant.py         # Core TurboQuant: TurboQuantMSE, TurboQuantProd, TurboQuantKVCache
-  compressors.py        # Asymmetric inner product compressors for real model validation
-  test_turboquant.py    # Synthetic algorithm tests
-  validate.py           # Real model attention comparison
-  requirements.txt      # Python dependencies
+  __init__.py           # Lazy imports for torch stack; NATIVE_AVAILABLE
+  api.py                # KeyCodec, ValueCodec (numpy-first, lazy torch)
+  types.py              # CompressionConfig, CompressedKeys, …
+  metrics.py            # Score metrics ([torch])
+  validation.py         # diagnose_attention_bhsd, … ([torch])
+  integration.py        # Hooks, KV estimates, dependency_guide
+  dependencies.py       # GUIDE_MARKDOWN (framework / PyTorch notes)
+  torch_impl.py         # Reference modules ([torch])
+  compressors.py
+  lloyd_max.py
+  synthetic_checks.py
+  validate.py
+  cli.py
+tests/                  # pytest
+docs/                   # vLLM / SGLang integration + tutorial
+  diagrams/             # draw.io 架构图（.drawio）
+examples/               # vLLM / SGLang dev launcher scripts
+cpp/                    # Eigen, libturboquant, pybind _native, tests
+requirements.txt        # Notes; prefer pyproject/uv
 ```
 
-### Module Details
+---
 
-**`lloyd_max.py`** — Solves the Lloyd-Max optimal quantizer for the coordinate distribution that arises after random rotation of unit vectors. Uses numerical integration (scipy) to find centroids that minimize MSE. Codebooks are precomputed once and reused.
+## Requirements & CUDA PyTorch
 
-**`turboquant.py`** — The core algorithm implementation. `TurboQuantMSE` does Stage 1 (rotation + quantization). `TurboQuantProd` adds Stage 2 (QJL residual correction) and provides the unbiased inner product estimator. `TurboQuantKVCache` wraps both into a cache interface.
+- **Python:** 3.10+
+- **Default:** `numpy>=1.22`
+- **Optional `[torch]`:** `torch`, `scipy`
+- **Optional `[validate]`:** `transformers`, `accelerate`, `bitsandbytes` (+ torch/scipy as listed)
 
-**`compressors.py`** — Production-oriented compressors that handle real model tensors (normalization, dtype conversion, asymmetric score computation). `TurboQuantCompressorV2` compresses key vectors and supports `asymmetric_attention_scores()` for computing attention directly from compressed data. `TurboQuantCompressorMSE` compresses value vectors with MSE-only quantization.
+Install CUDA-enabled PyTorch from the official index, e.g.:
 
-## Requirements
-
-- Python 3.10+
-- PyTorch 2.0+ with CUDA (for GPU tests)
-- scipy (for codebook computation)
-- transformers, accelerate, bitsandbytes (for real model validation only)
-
-```bash
-pip install -r requirements.txt
-```
-
-For CUDA PyTorch:
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
-## References
+---
 
-- [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate](https://arxiv.org/abs/2504.19874) (ICLR 2026)
-- [QJL: 1-Bit Quantized JL Transform for KV Cache Quantization with Zero Overhead](https://arxiv.org/abs/2406.03482) — The 1-bit residual correction technique
-- [PolarQuant: Quantizing KV Caches with Polar Transformation](https://arxiv.org/abs/2502.02617) — Related approach using polar coordinates
-- [QJL Reference Implementation](https://github.com/amirzandieh/QJL) — Original CUDA implementation by the QJL authors
-- [PolarQuant Reference Implementation](https://github.com/ericshwu/PolarQuant)
+## References & license
 
-## License
+- [TurboQuant (ICLR 2026)](https://arxiv.org/abs/2504.19874)
+- [QJL](https://arxiv.org/abs/2406.03482)
+- [PolarQuant](https://arxiv.org/abs/2502.02617)
+- [QJL reference (CUDA)](https://github.com/amirzandieh/QJL)
+- [PolarQuant reference](https://github.com/ericshwu/PolarQuant)
 
-MIT
+**License:** MIT
